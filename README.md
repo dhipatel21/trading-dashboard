@@ -1,0 +1,85 @@
+# Trading Strategy Lab
+
+A live-refreshing dashboard for comparing classic technical, statistical, machine-learning,
+deep-learning and reinforcement-learning trading strategies across any stocks you choose —
+built on open-source tools (yfinance, scikit-learn, PyTorch, Streamlit, Plotly).
+
+This is **not a frozen snapshot**: data is pulled on demand (yfinance, with an optional
+Alpha Vantage fallback/key), cached for only 20–60 seconds, and there's a live auto-refreshing
+quote view alongside the backtests.
+
+## Quickstart
+
+```bash
+cd trading-dashboard
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+Then open the local URL Streamlit prints (usually http://localhost:8501).
+
+## What's in the strategy library
+
+| Category | Strategy | Idea |
+|---|---|---|
+| Trend Following | SMA Crossover (Golden/Death Cross) | Long when 50-day SMA > 200-day SMA |
+| Trend Following | MACD Trend/Momentum | Long when MACD line > signal line |
+| Trend Following | Donchian Channel Breakout (Turtle) | Long on 20-day high breakout, exit on 10-day low |
+| Mean Reversion | RSI Oversold/Overbought | Buy RSI < 30, exit RSI > 70 |
+| Mean Reversion | Bollinger Band Reversion | Buy below lower band, exit at the mean |
+| Mean Reversion / Statistical | Rolling Z-Score Reversion | Trade the z-score of price vs its own rolling distribution |
+| Momentum | Time-Series Momentum (12-1) | Long/short on trailing 6-month return sign |
+| Momentum | Volatility-Managed Momentum | Time-series momentum, stands aside in high-vol regimes |
+| Machine Learning | Random Forest Alpha Model | Walk-forward RF classifier on technical features |
+| Machine Learning | Gradient-Boosted Trees Alpha Model | Walk-forward HistGBM classifier (XGBoost/LightGBM-style) |
+| Deep Learning | LSTM Sequence Model | Small LSTM over a 20-day feature window, retrained walk-forward |
+| Reinforcement Learning | Q-Learning RL Agent | Tabular RL agent (RSI/momentum/position state), FinRL-style reward |
+| Benchmark | Buy & Hold | The baseline everything else must beat |
+
+Every strategy is trained/signaled **walk-forward** — no look-ahead: a model only ever sees
+data through day *t-1* when deciding day *t*'s position, and the backtester applies that
+position starting the following bar's return.
+
+Full descriptions + academic/open-source references are in the app's **Methodology** tab.
+
+## Dashboard tabs
+
+- **🔴 Live Market** — auto-refreshing quotes + intraday sparklines for every ticker you add.
+- **📈 Backtest & Equity Curves** — growth-of-$100 curves per strategy for a focus ticker.
+- **🏆 Model Comparison** — Sharpe-ratio heatmap (strategy × ticker), average-Sharpe ranking,
+  best-model-per-ticker leaderboard, full metrics table (CAGR, Sharpe, Sortino, Max Drawdown,
+  Calmar, Win Rate, # Trades, excess return vs. buy & hold).
+- **🔍 Deep Dive** — equity curve, drawdown, rolling Sharpe, and trade log for one ticker+model.
+- **📚 Methodology** — every strategy's description, reference, and the backtest assumptions.
+
+## Data sources
+
+- **yfinance** (default): free, no API key, scrapes Yahoo Finance. Good for daily history and
+  ~15-min-delayed intraday quotes.
+- **Alpha Vantage** (optional fallback or primary): get a free key at
+  https://www.alphavantage.co/support/#api-key, paste it in the sidebar (or set
+  `ALPHAVANTAGE_API_KEY` in a `.env`/shell env var). Free tier is rate-limited (5 calls/min,
+  25/day) — useful as a backup when yfinance is rate-limited, or for fundamentals/news-sentiment
+  extensions later.
+
+## Adding your own strategy
+
+1. Add a function `my_strategy(df, **params) -> pd.Series` returning values in `{-1, 0, 1}`
+   to a file under `src/strategies/`.
+2. Register it: `register(Strategy(key=..., name=..., category=..., description=...,
+   reference=..., signal_fn=my_strategy, params={...}))`.
+3. Import that module in `src/strategies/__init__.py`.
+
+It will automatically show up in the sidebar's strategy multiselect and in every comparison view.
+
+## Notes / limitations
+
+- Educational tool, **not investment advice**. Backtests use a flat transaction-cost
+  assumption and no slippage/market-impact model.
+- ML/DL/RL models are intentionally small so they can retrain interactively; on long
+  histories (5–10y) the LSTM and Q-learning strategies take longer to run — a progress bar
+  shows status while backtests compute.
+- yfinance occasionally rate-limits or has outages; that's what the Alpha Vantage fallback
+  is for.

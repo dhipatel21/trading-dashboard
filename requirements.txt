@@ -1,0 +1,13 @@
+streamlit>=1.38
+streamlit-autorefresh>=1.0.1
+yfinance>=0.2.43
+requests>=2.31
+pandas>=2.1
+numpy>=1.26
+plotly>=5.22
+scikit-learn>=1.4
+
+# CPU-only wheel: much smaller/faster to install on resource-limited hosts
+# (e.g. Streamlit Community Cloud) than the default CUDA-bundled PyPI build.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.2
