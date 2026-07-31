@@ -9,30 +9,43 @@ from __future__ import annotations
 from sklearn.ensemble import RandomForestClassifier, HistGradientBoostingClassifier
 
 from .base import Strategy, register
-from .features import build_feature_matrix, build_target, walk_forward_predict
+from .features import build_feature_matrix, build_target, walk_forward_predict, train_final_predict_proba
+
+
+def _rf_factory(n_estimators: int):
+    return lambda: RandomForestClassifier(
+        n_estimators=n_estimators, max_depth=5, min_samples_leaf=20, random_state=42, n_jobs=-1,
+    )
+
+
+def _gb_factory():
+    return HistGradientBoostingClassifier(max_depth=4, max_iter=150, learning_rate=0.08, random_state=42)
 
 
 def random_forest_signal(df, min_train: int = 252, refit_every: int = 21, n_estimators: int = 200):
     feats = build_feature_matrix(df)
     target = build_target(df)
+    return walk_forward_predict(feats, target, _rf_factory(n_estimators), min_train, refit_every)
 
-    def factory():
-        return RandomForestClassifier(
-            n_estimators=n_estimators, max_depth=5, min_samples_leaf=20,
-            random_state=42, n_jobs=-1,
-        )
 
-    return walk_forward_predict(feats, target, factory, min_train, refit_every)
+def random_forest_predict_latest(df, min_train: int = 252, refit_every: int = 21, n_estimators: int = 200) -> dict:
+    feats = build_feature_matrix(df)
+    target = build_target(df)
+    signal, confidence = train_final_predict_proba(feats, target, _rf_factory(n_estimators))
+    return {"signal": signal, "confidence": confidence}
 
 
 def gradient_boosting_signal(df, min_train: int = 252, refit_every: int = 21):
     feats = build_feature_matrix(df)
     target = build_target(df)
+    return walk_forward_predict(feats, target, _gb_factory, min_train, refit_every)
 
-    def factory():
-        return HistGradientBoostingClassifier(max_depth=4, max_iter=150, learning_rate=0.08, random_state=42)
 
-    return walk_forward_predict(feats, target, factory, min_train, refit_every)
+def gradient_boosting_predict_latest(df, min_train: int = 252, refit_every: int = 21) -> dict:
+    feats = build_feature_matrix(df)
+    target = build_target(df)
+    signal, confidence = train_final_predict_proba(feats, target, _gb_factory)
+    return {"signal": signal, "confidence": confidence}
 
 
 register(Strategy(
@@ -47,6 +60,7 @@ register(Strategy(
               "Machine Learning', Review of Financial Studies (2020).",
     signal_fn=random_forest_signal,
     params={"min_train": 252, "refit_every": 21, "n_estimators": 200},
+    predict_fn=random_forest_predict_latest,
 ))
 
 register(Strategy(
@@ -60,4 +74,5 @@ register(Strategy(
               "Ke et al., 'LightGBM' (2017); scikit-learn HistGradientBoostingClassifier.",
     signal_fn=gradient_boosting_signal,
     params={"min_train": 252, "refit_every": 21},
+    predict_fn=gradient_boosting_predict_latest,
 ))

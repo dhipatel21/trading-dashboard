@@ -23,7 +23,7 @@ from src.data_feed import get_history, get_live_quotes
 from src.strategies import all_strategies, get as get_strategy
 from src.backtest import backtest_strategy, leaderboard
 from src.theme import register_template, CATEGORICAL, DIVERGING, GOOD, CRITICAL
-from src.ui import inject_css, hero, category_chip
+from src.ui import inject_css, page_header, category_chip
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -31,12 +31,36 @@ try:
 except ImportError:
     HAS_AUTOREFRESH = False
 
-st.set_page_config(page_title="Trading Strategy Lab", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Trading Strategy Lab", layout="wide")
 register_template()
 inject_css()
 
 DEFAULT_TICKERS = ["AAPL", "MSFT", "NVDA", "SPY"]
 PERIOD_OPTIONS = {"6 months": "6mo", "1 year": "1y", "2 years": "2y", "5 years": "5y", "10 years": "10y", "Max": "max"}
+
+# Curated, liquid large-caps across sectors + two index ETFs. This is the full
+# selectable pool for a universe scan — big enough to be interesting, but NOT
+# the default selection (see DEFAULT_SCAN_UNIVERSE below): scanning all 40 against
+# several models means dozens of fresh network fetches, which can take minutes.
+DEFAULT_UNIVERSE = [
+    "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AVGO",
+    "JPM", "V", "MA", "UNH", "JNJ", "PG", "HD", "XOM",
+    "CVX", "BAC", "WMT", "KO", "PEP", "COST", "ADBE", "CRM",
+    "AMD", "NFLX", "DIS", "PFE", "MRK", "ORCL", "IBM", "GE",
+    "CAT", "BA", "INTC", "QCOM", "T", "VZ", "SPY", "QQQ",
+]
+
+# Small, fast defaults so "Run Universe Scan" feels responsive out of the box.
+# Users can expand either multiselect for a broader (slower) scan.
+DEFAULT_SCAN_UNIVERSE = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "JPM", "SPY", "QQQ"]
+DEFAULT_SCAN_STRATEGIES = ["buy_and_hold", "sma_crossover", "rsi_mean_reversion", "random_forest"]
+
+SIGNAL_LABELS = {1: "LONG", 0: "FLAT", -1: "SHORT"}
+
+
+def _style_signal(v):
+    color = {"LONG": GOOD, "SHORT": CRITICAL, "FLAT": "#898781"}.get(v, "#898781")
+    return f"color: {color}; font-weight: 700;"
 
 # ----------------------------------------------------------------------------
 # Session state
@@ -56,17 +80,17 @@ CATEGORY_ORDER = ["Trend Following", "Mean Reversion", "Mean Reversion / Statist
 # Sidebar — controls
 # ----------------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("## 📈 Strategy Lab")
+    st.markdown("## Strategy Lab")
     st.caption("Configure tickers, models & data source below.")
     st.divider()
 
     st.subheader("Tickers")
     new_ticker = st.text_input("Add a ticker (e.g. TSLA)", value="", key="add_ticker").strip().upper()
     add_col1, add_col2 = st.columns([1, 1])
-    if add_col1.button("➕ Add", width="stretch") and new_ticker:
+    if add_col1.button("Add", width="stretch") and new_ticker:
         if new_ticker not in st.session_state.tickers:
             st.session_state.tickers.append(new_ticker)
-    if add_col2.button("↺ Reset list", width="stretch"):
+    if add_col2.button("Reset list", width="stretch"):
         st.session_state.tickers = DEFAULT_TICKERS.copy()
 
     tickers = st.multiselect(
@@ -101,12 +125,15 @@ with st.sidebar:
     st.session_state.av_api_key = av_key_input
 
     st.subheader("Live view")
-    live_auto = st.checkbox("Auto-refresh live prices", value=HAS_AUTOREFRESH)
+    live_auto = st.checkbox("Auto-refresh live prices", value=False)
     live_interval = st.slider("Refresh every (seconds)", 2, 60, 5, disabled=not HAS_AUTOREFRESH)
     if not HAS_AUTOREFRESH:
         st.caption("Install `streamlit-autorefresh` for automatic polling; use the manual refresh button below for now.")
+    elif live_auto:
+        st.caption("Note: auto-refresh reruns the whole app on a timer, which will interrupt any "
+                   "in-progress backtest or universe scan before it finishes. Turn it off while running those.")
 
-    run_clicked = st.button("🚀 Run / Refresh Backtests", type="primary", width="stretch")
+    run_clicked = st.button("Run / Refresh Backtests", type="primary", width="stretch")
 
 
 # ----------------------------------------------------------------------------
@@ -142,18 +169,56 @@ def run_all(tickers, strategy_keys, period, cost_bps, capital, prefer):
     return results, sources
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_prediction(ticker: str, period: str, strategy_key: str, prefer: str):
+    df, source = get_history(ticker, period=period, interval="1d", prefer=prefer)
+    if df.empty or len(df) < 60:
+        return None
+    strategy = get_strategy(strategy_key)
+    pred = strategy.predict_latest(df)
+    momentum_21d = float(df["Close"].pct_change(21).iloc[-1]) if len(df) > 21 else None
+    return {
+        "ticker": ticker,
+        "strategy_key": strategy_key,
+        "signal": pred["signal"],
+        "confidence": pred["confidence"],
+        "momentum_21d": momentum_21d,
+        "price": float(df["Close"].iloc[-1]),
+        "as_of": df.index[-1],
+        "source": source,
+    }
+
+
+def run_predictions(tickers, strategy_keys, period, prefer, label="Running predictions"):
+    preds = {}
+    total = len(tickers) * len(strategy_keys)
+    if total == 0:
+        return preds
+    progress = st.progress(0.0, text=f"{label}… 0/{total}")
+    done = 0
+    for t in tickers:
+        for sk in strategy_keys:
+            p = cached_prediction(t, period, sk, prefer)
+            if p is not None:
+                preds[(t, sk)] = p
+            done += 1
+            progress.progress(done / total, text=f"{label}… {done}/{total} · {t} / {STRAT_BY_KEY[sk].name}")
+    progress.empty()
+    return preds
+
+
 # ----------------------------------------------------------------------------
-# Hero + tabs
+# Header + tabs
 # ----------------------------------------------------------------------------
-hero(
+page_header(
     "Trading Strategy Lab",
     f"Comparing {len(STRATS)} strategies — trend, mean-reversion, momentum, ML, deep learning "
-    "& reinforcement learning — across live and historical stock data. Nothing here is a "
+    "and reinforcement learning — across live and historical stock data. Nothing here is a "
     "frozen snapshot: prices refresh on demand and every model retrains walk-forward.",
 )
 
-tab_live, tab_backtest, tab_compare, tab_deep, tab_about = st.tabs(
-    ["🔴 Live Market", "📈 Backtest & Equity Curves", "🏆 Model Comparison", "🔍 Deep Dive", "📚 Methodology"]
+tab_live, tab_backtest, tab_compare, tab_deep, tab_predict, tab_about = st.tabs(
+    ["Live Market", "Backtest & Equity Curves", "Model Comparison", "Deep Dive", "Predictions", "Methodology"]
 )
 
 # ---- Live Market -------------------------------------------------------
@@ -162,15 +227,11 @@ with tab_live:
 
     if HAS_AUTOREFRESH and live_auto:
         st_autorefresh(interval=live_interval * 1000, key="live_autorefresh")
-    manual_refresh = st.button("🔄 Refresh now")
+    manual_refresh = st.button("Refresh now")
 
     if tickers:
         quotes = get_live_quotes(tickers)
         if not quotes.empty:
-            display = quotes.copy()
-            display["price"] = display["price"].map(lambda x: f"${x:,.2f}" if pd.notna(x) else "—")
-            display["change_pct"] = quotes["change_pct"]
-
             def _style_change(v):
                 if pd.isna(v):
                     return ""
@@ -242,8 +303,10 @@ with tab_backtest:
                     bnorm = bench.benchmark_equity / bench.benchmark_equity.iloc[0] * 100
                     fig.add_trace(go.Scatter(x=bnorm.index, y=bnorm.values, mode="lines", name=f"{focus_ticker} Buy & Hold",
                                               line=dict(width=1.5, color="#898781", dash="dot")))
-                fig.update_layout(title=f"{focus_ticker}: growth of $100 by strategy", yaxis_title="Value ($)",
-                                   legend=dict(orientation="h", yanchor="bottom", y=1.02))
+                fig.update_layout(title=f"{focus_ticker} — Indexed Strategy Performance (Base = 100)",
+                                   yaxis_title="Index (base = 100)",
+                                   legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02),
+                                   margin=dict(r=170))
                 st.plotly_chart(fig, use_container_width=True)
 
             lb_rows = [r for r in results.values()]
@@ -268,7 +331,7 @@ with tab_compare:
         pivot = lb_df.pivot_table(index="Strategy", columns="Ticker", values="Sharpe")
         heat = go.Figure(go.Heatmap(
             z=pivot.values, x=pivot.columns, y=pivot.index,
-            colorscale=[[0, "#8a1f1f"], [0.5, "#f0efec"], [1, "#0d366b"]],
+            colorscale=[[0, "#8a1f1f"], [0.5, "#383835"], [1, "#184f95"]],
             zmid=0, colorbar=dict(title="Sharpe"),
             text=[[f"{v:.2f}" if pd.notna(v) else "" for v in row] for row in pivot.values],
             texttemplate="%{text}",
@@ -328,7 +391,7 @@ with tab_deep:
         running_max = eq.cummax()
         dd = (eq / running_max - 1) * 100
         dd_fig = go.Figure(go.Scatter(x=dd.index, y=dd.values, fill="tozeroy", line=dict(color=CRITICAL, width=1.5),
-                                       fillcolor="rgba(208,59,59,0.15)"))
+                                       fillcolor="rgba(230,103,103,0.15)"))
         dd_fig.update_layout(title="Drawdown (%)", yaxis_title="Drawdown %")
         st.plotly_chart(dd_fig, use_container_width=True)
 
@@ -342,6 +405,97 @@ with tab_deep:
         if not trades.empty:
             st.subheader("Position changes")
             st.dataframe(trades.rename("Position").to_frame().tail(50), width="stretch")
+
+# ---- Predictions ------------------------------------------------------------
+with tab_predict:
+    st.subheader("Live model predictions")
+    st.caption("Each model refits on all available history through the latest close and predicts "
+               "the next, not-yet-realized bar. ML/DL models show a genuine confidence "
+               "(predicted-class probability); rule-based models don't produce one. Not investment advice.")
+
+    if not tickers or not chosen_keys:
+        st.info("Pick at least one ticker and one strategy in the sidebar.")
+    else:
+        predict_clicked = st.button("Run Predictions", type="primary", key="run_predictions_btn")
+        if predict_clicked or "predictions" not in st.session_state:
+            st.session_state.predictions = run_predictions(tickers, chosen_keys, period, prefer_source_key)
+        predictions = st.session_state.get("predictions", {})
+
+        if predictions:
+            rows = [{
+                "Ticker": t, "Strategy": STRAT_BY_KEY[sk].name, "Signal": SIGNAL_LABELS[p["signal"]],
+                "Confidence": p["confidence"], "21D Momentum": p["momentum_21d"],
+                "Last Price": p["price"], "As Of": p["as_of"], "Source": p["source"],
+            } for (t, sk), p in predictions.items()]
+            pred_df = pd.DataFrame(rows).sort_values(["Ticker", "Strategy"])
+            # Bake display strings in before styling — Streamlit's dataframe grid renders
+            # NaN/None cells as the literal text "None", ignoring Styler.format for them.
+            pred_df["Confidence"] = pred_df["Confidence"].map(lambda x: f"{x:.0%}" if pd.notna(x) else "—")
+            pred_df["21D Momentum"] = pred_df["21D Momentum"].map(lambda x: f"{x:+.1%}" if pd.notna(x) else "—")
+            pred_df["Last Price"] = pred_df["Last Price"].map(lambda x: f"${x:,.2f}")
+            pred_df["As Of"] = pred_df["As Of"].map(lambda x: x.strftime("%Y-%m-%d"))
+
+            styled = pred_df.style.map(_style_signal, subset=["Signal"])
+            st.dataframe(styled, width="stretch", hide_index=True)
+        else:
+            st.info("Click **Run Predictions** to compute current model calls.")
+
+    st.divider()
+    st.subheader("Top 10 stocks by model")
+    st.caption("Scans a broader universe and ranks the tickers each model currently favors long — "
+               "by confidence for ML/DL models, by 21-day momentum as a tiebreaker (or primary "
+               "ranking) for rule-based models.")
+
+    scan_universe = st.multiselect(
+        "Universe to scan", options=sorted(set(DEFAULT_UNIVERSE + tickers)),
+        default=DEFAULT_SCAN_UNIVERSE, key="scan_universe",
+        help="Defaults to a small, fast set. Add more tickers for a broader scan — "
+             "each one is a fresh network fetch, so a bigger universe takes longer.",
+    )
+    rank_strat_labels = st.multiselect(
+        "Models to rank", options=list(strat_labels.keys()),
+        default=[lbl for lbl, k in strat_labels.items() if k in DEFAULT_SCAN_STRATEGIES],
+        key="rank_strats",
+    )
+    rank_keys = [strat_labels[l] for l in rank_strat_labels]
+
+    n_combos = len(scan_universe) * len(rank_keys)
+    if n_combos:
+        est_note = " — cached results (last 5 min) return instantly" if n_combos else ""
+        st.caption(f"This scan will run {len(scan_universe)} tickers × {len(rank_keys)} models "
+                   f"= {n_combos} predictions{est_note}.")
+
+    scan_clicked = st.button("Run Universe Scan", key="run_scan_btn")
+    if scan_clicked:
+        st.session_state.universe_predictions = run_predictions(
+            scan_universe, rank_keys, period, prefer_source_key, label="Scanning universe",
+        )
+    universe_predictions = st.session_state.get("universe_predictions", {})
+
+    if universe_predictions:
+        for sk in rank_keys:
+            strat = STRAT_BY_KEY[sk]
+            rows = [p for (t, k), p in universe_predictions.items() if k == sk]
+            if not rows:
+                continue
+            df_rank = pd.DataFrame(rows).sort_values(
+                by=["signal", "confidence", "momentum_21d"],
+                ascending=[False, False, False],
+                na_position="last",
+            )
+            top10 = df_rank.head(10)[["ticker", "signal", "confidence", "momentum_21d", "price"]].copy()
+            top10["signal"] = top10["signal"].map(SIGNAL_LABELS)
+            top10.columns = ["Ticker", "Signal", "Confidence", "21D Momentum", "Last Price"]
+            # Bake display strings in before styling — see note above on Streamlit's null rendering.
+            top10["Confidence"] = top10["Confidence"].map(lambda x: f"{x:.0%}" if pd.notna(x) else "—")
+            top10["21D Momentum"] = top10["21D Momentum"].map(lambda x: f"{x:+.1%}" if pd.notna(x) else "—")
+            top10["Last Price"] = top10["Last Price"].map(lambda x: f"${x:,.2f}")
+
+            st.markdown(f"**{strat.name}** · _{strat.category}_")
+            styled_top = top10.style.map(_style_signal, subset=["Signal"])
+            st.dataframe(styled_top, width="stretch", hide_index=True)
+    else:
+        st.info("Click **Run Universe Scan** to rank the universe for each selected model.")
 
 # ---- Methodology ----------------------------------------------------------
 with tab_about:
@@ -368,6 +522,12 @@ with tab_about:
 - **Data**: pulled live via `yfinance` (free, no key) with an optional Alpha Vantage fallback.
   Historical caches expire every 60s (daily bars) / 5s (live quotes) so results reflect
   current data, not a frozen snapshot.
+- **Predictions tab**: separate from backtesting. Each model does one *final* fit on all
+  history through today's close and predicts the next, not-yet-realized bar — this is a
+  genuine forecast, not a backtested result. Random Forest, Gradient Boosting and the LSTM
+  report a real confidence (predicted-class probability); rule-based and RL strategies show
+  signal only. The universe scan runs this once per ticker × model, so a bigger universe or
+  more models takes longer — defaults are kept small so the first run feels responsive.
 """)
     st.warning("Educational tool only — not investment advice. Backtested performance does not "
                "guarantee future results. Small-sample ML/RL models are especially prone to overfitting.")

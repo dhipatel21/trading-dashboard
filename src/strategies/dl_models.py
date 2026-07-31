@@ -100,6 +100,64 @@ def lstm_signal(
     return pd.Series(preds, index=feats.index)
 
 
+def lstm_predict_latest(
+    df: pd.DataFrame,
+    seq_len: int = 20,
+    min_train: int = 252,
+    refit_every: int = 63,
+    epochs: int = 15,
+    hidden: int = 16,
+) -> dict:
+    """One final fit on ALL available history, then predict the next, not-yet-realized bar."""
+    feats = build_feature_matrix(df)
+    target = build_target(df)
+
+    means = feats.rolling(252, min_periods=30).mean()
+    stds = feats.rolling(252, min_periods=30).std().replace(0, np.nan)
+    norm_feats = ((feats - means) / stds).fillna(0.0).clip(-5, 5)
+
+    X_all = norm_feats.values.astype(np.float32)
+    y_all = target.values.astype(np.float32)
+    valid = ~np.isnan(X_all).any(axis=1) & ~np.isnan(y_all)
+    n = len(feats)
+
+    if n < seq_len + 30 or np.isnan(X_all[-seq_len:]).any():
+        return {"signal": 0, "confidence": None}
+
+    train_mask = valid.copy()
+    train_mask[n - 1:] = False  # never train on tomorrow's unknown target
+    X_train_raw = X_all[:-1][train_mask[:-1]]
+    y_train_raw = y_all[:-1][train_mask[:-1]]
+    if len(X_train_raw) < seq_len + 30:
+        return {"signal": 0, "confidence": None}
+
+    Xs, ys = _make_sequences(X_train_raw, y_train_raw, seq_len)
+    ys_bin = (ys > 0).astype(np.float32)
+    if len(np.unique(ys_bin)) < 2:
+        return {"signal": 0, "confidence": None}
+
+    torch.manual_seed(42)
+    model = _TinyLSTM(n_features=X_all.shape[1], hidden=hidden)
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    loss_fn = nn.BCEWithLogitsLoss()
+    xt, yt = torch.tensor(Xs), torch.tensor(ys_bin)
+    model.train()
+    for _ in range(epochs):
+        opt.zero_grad()
+        loss = loss_fn(model(xt), yt)
+        loss.backward()
+        opt.step()
+
+    model.eval()
+    window = X_all[-seq_len:][None, :, :]
+    with torch.no_grad():
+        logit = model(torch.tensor(window)).item()
+    prob_up = 1 / (1 + np.exp(-logit))
+    signal = 1 if logit > 0 else -1
+    confidence = prob_up if signal == 1 else 1 - prob_up
+    return {"signal": signal, "confidence": float(confidence)}
+
+
 register(Strategy(
     key="lstm",
     name="LSTM Sequence Model",
@@ -113,4 +171,5 @@ register(Strategy(
               "'Transformers versus LSTMs for electronic trading' (arXiv:2309.11400, 2024).",
     signal_fn=lstm_signal,
     params={"seq_len": 20, "min_train": 252, "refit_every": 63, "epochs": 15, "hidden": 16},
+    predict_fn=lstm_predict_latest,
 ))

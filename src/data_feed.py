@@ -139,7 +139,14 @@ def get_live_quote(ticker: str) -> dict:
             "ok": price is not None,
         }
     except Exception as e:  # noqa: BLE001
-        return {"ticker": ticker, "ok": False, "error": str(e), "as_of": pd.Timestamp.now()}
+        # Keep the same schema as the success path — a partial-failure batch (some
+        # tickers rate-limited, others fine) must not leave columns like "price"
+        # missing from the resulting DataFrame entirely.
+        return {
+            "ticker": ticker, "price": None, "prev_close": None, "change": None,
+            "change_pct": None, "day_high": None, "day_low": None, "volume": None,
+            "market_cap": None, "as_of": pd.Timestamp.now(), "ok": False, "error": str(e),
+        }
 
 
 def get_live_quotes(tickers: list[str]) -> pd.DataFrame:

@@ -94,3 +94,39 @@ def walk_forward_predict(
         i = end
 
     return pd.Series(preds, index=feats.index)
+
+
+def train_final_predict_proba(
+    feats: pd.DataFrame,
+    target: pd.Series,
+    model_factory,
+    min_train: int = 30,
+) -> tuple[int, float | None]:
+    """Fit once on ALL rows whose target is already known, then predict the
+    *next*, not-yet-realized bar from the most recent feature row.
+
+    Returns (signal in {-1, 1}, confidence = predicted-class probability), or
+    (0, None) if there isn't enough clean history to fit on yet.
+    """
+    X = feats.values
+    y = target.values
+    n = len(feats)
+    valid = ~np.isnan(X).any(axis=1) & ~np.isnan(y)
+
+    train_idx = np.arange(0, n - 1)
+    train_idx = train_idx[valid[train_idx]]
+    if len(train_idx) < min_train or len(np.unique(y[train_idx])) < 2:
+        return 0, None
+    if np.isnan(X[-1]).any():
+        return 0, None
+
+    model = model_factory()
+    model.fit(X[train_idx], y[train_idx])
+    last_row = X[-1:].astype(float)
+    pred_label = int(model.predict(last_row)[0])
+    proba = None
+    if hasattr(model, "predict_proba"):
+        classes = list(model.classes_)
+        p = model.predict_proba(last_row)[0]
+        proba = float(p[classes.index(pred_label)])
+    return (1 if pred_label > 0 else -1), proba

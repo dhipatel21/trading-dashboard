@@ -1,47 +1,54 @@
-"""Shared Plotly theme: fixed-order categorical palette + sequential/diverging ramps.
+"""Shared Plotly theme (dark mode): fixed-order categorical palette + sequential/diverging ramps.
 
-Colors come from a validated colorblind-safe palette (OKLab CVD-checked). Hue
-order is fixed and never re-cycled across charts — series keep the same color
-wherever they appear.
+Colors come from a validated colorblind-safe palette (OKLab CVD-checked), dark-mode
+column. Hue order is fixed and never re-cycled across charts — series keep the same
+color wherever they appear.
 """
 import plotly.graph_objects as go
 import plotly.io as pio
 
 CATEGORICAL = [
-    "#2a78d6",  # 1 blue
+    "#3987e5",  # 1 blue
     "#008300",  # 2 green
-    "#e87ba4",  # 3 magenta
-    "#eda100",  # 4 yellow
-    "#1baf7a",  # 5 aqua
-    "#eb6834",  # 6 orange
-    "#4a3aa7",  # 7 violet
-    "#e34948",  # 8 red
+    "#d55181",  # 3 magenta
+    "#c98500",  # 4 yellow
+    "#199e70",  # 5 aqua
+    "#d95926",  # 6 orange
+    "#9085e9",  # 7 violet
+    "#e66767",  # 8 red
 ]
 
-SEQUENTIAL_BLUE = ["#cde2fb", "#9ec5f4", "#5598e7", "#2a78d6", "#184f95", "#0d366b"]
-DIVERGING = ["#0d366b", "#2a78d6", "#9ec5f4", "#f0efec", "#f3a58c", "#e34948", "#8a1f1f"]
+DIVERGING = ["#184f95", "#3987e5", "#6da7ec", "#383835", "#e08f76", "#e66767", "#8a1f1f"]
 
 GOOD = "#0ca30c"
-CRITICAL = "#d03b3b"
+WARNING = "#fab219"
+CRITICAL = "#e66767"
 
-SURFACE_LIGHT = "#fcfcfb"
-INK_LIGHT = "#0b0b0b"
-MUTED_LIGHT = "#898781"
-GRID_LIGHT = "#e1e0d9"
+SURFACE_DARK = "#1a1a19"
+PAGE_DARK = "#0a0a0b"
+INK_DARK = "#ffffff"
+SECONDARY_INK_DARK = "#c3c2b7"
+MUTED_DARK = "#898781"
+GRID_DARK = "#2c2c2a"
+BASELINE_DARK = "#383835"
+
+MONO_FONT = 'ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace'
+SANS_FONT = "system-ui, -apple-system, Segoe UI, sans-serif"
 
 
 def register_template():
     template = go.layout.Template()
     template.layout = go.Layout(
         colorway=CATEGORICAL,
-        font=dict(family="system-ui, -apple-system, Segoe UI, sans-serif", color=INK_LIGHT, size=13),
-        paper_bgcolor=SURFACE_LIGHT,
-        plot_bgcolor=SURFACE_LIGHT,
-        xaxis=dict(gridcolor=GRID_LIGHT, zerolinecolor=GRID_LIGHT, linecolor=MUTED_LIGHT, showline=True),
-        yaxis=dict(gridcolor=GRID_LIGHT, zerolinecolor=GRID_LIGHT, linecolor=MUTED_LIGHT, showline=True),
-        legend=dict(bgcolor="rgba(0,0,0,0)"),
+        font=dict(family=SANS_FONT, color=SECONDARY_INK_DARK, size=12),
+        paper_bgcolor=SURFACE_DARK,
+        plot_bgcolor=SURFACE_DARK,
+        xaxis=dict(gridcolor=GRID_DARK, zerolinecolor=GRID_DARK, linecolor=BASELINE_DARK, showline=True),
+        yaxis=dict(gridcolor=GRID_DARK, zerolinecolor=GRID_DARK, linecolor=BASELINE_DARK, showline=True),
+        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color=SECONDARY_INK_DARK)),
         margin=dict(l=50, r=20, t=40, b=40),
         hovermode="x unified",
+        title=dict(font=dict(color=INK_DARK, size=14)),
     )
     pio.templates["dashboard"] = template
     pio.templates.default = "dashboard"

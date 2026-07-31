@@ -46,13 +46,24 @@ Full descriptions + academic/open-source references are in the app's **Methodolo
 
 ## Dashboard tabs
 
-- **🔴 Live Market** — auto-refreshing quotes + intraday sparklines for every ticker you add.
-- **📈 Backtest & Equity Curves** — growth-of-$100 curves per strategy for a focus ticker.
-- **🏆 Model Comparison** — Sharpe-ratio heatmap (strategy × ticker), average-Sharpe ranking,
+- **Live Market** — quotes + intraday sparklines for every ticker you add, with an optional
+  auto-refresh (off by default — see note below).
+- **Backtest & Equity Curves** — indexed (base = 100) equity curves per strategy for a focus ticker.
+- **Model Comparison** — Sharpe-ratio heatmap (strategy × ticker), average-Sharpe ranking,
   best-model-per-ticker leaderboard, full metrics table (CAGR, Sharpe, Sortino, Max Drawdown,
   Calmar, Win Rate, # Trades, excess return vs. buy & hold).
-- **🔍 Deep Dive** — equity curve, drawdown, rolling Sharpe, and trade log for one ticker+model.
-- **📚 Methodology** — every strategy's description, reference, and the backtest assumptions.
+- **Deep Dive** — equity curve, drawdown, rolling Sharpe, and trade log for one ticker+model.
+- **Predictions** — what every model says to do *right now*: each strategy refits on all
+  available history through the latest close and predicts the next, not-yet-realized bar.
+  ML/DL models (Random Forest, Gradient Boosting, LSTM) report a genuine confidence
+  (predicted-class probability); rule-based models show signal only. Also scans a configurable
+  universe of tickers and ranks the top 10 each model currently favors long.
+- **Methodology** — every strategy's description, reference, and the backtest assumptions.
+
+> **Auto-refresh note**: the "Auto-refresh live prices" toggle on the Live Market tab reruns
+> the *entire* app on a timer (a Streamlit limitation — it can't refresh just one tab). Leave
+> it off while running a backtest or a Predictions universe scan, or it'll cancel the
+> in-progress computation before it finishes.
 
 ## Data sources
 
