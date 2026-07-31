@@ -23,6 +23,7 @@ from src.data_feed import get_history, get_live_quotes
 from src.strategies import all_strategies, get as get_strategy
 from src.backtest import backtest_strategy, leaderboard
 from src.theme import register_template, CATEGORICAL, DIVERGING, GOOD, CRITICAL
+from src.ui import inject_css, hero, category_chip
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -32,6 +33,7 @@ except ImportError:
 
 st.set_page_config(page_title="Trading Strategy Lab", page_icon="📈", layout="wide")
 register_template()
+inject_css()
 
 DEFAULT_TICKERS = ["AAPL", "MSFT", "NVDA", "SPY"]
 PERIOD_OPTIONS = {"6 months": "6mo", "1 year": "1y", "2 years": "2y", "5 years": "5y", "10 years": "10y", "Max": "max"}
@@ -54,8 +56,9 @@ CATEGORY_ORDER = ["Trend Following", "Mean Reversion", "Mean Reversion / Statist
 # Sidebar — controls
 # ----------------------------------------------------------------------------
 with st.sidebar:
-    st.title("📈 Trading Strategy Lab")
-    st.caption("Live-refreshing multi-stock, multi-model comparison dashboard.")
+    st.markdown("## 📈 Strategy Lab")
+    st.caption("Configure tickers, models & data source below.")
+    st.divider()
 
     st.subheader("Tickers")
     new_ticker = st.text_input("Add a ticker (e.g. TSLA)", value="", key="add_ticker").strip().upper()
@@ -77,7 +80,7 @@ with st.sidebar:
     period = PERIOD_OPTIONS[period_label]
 
     st.subheader("Strategies")
-    strat_labels = {f"{s.category} — {s.name}": s.key for s in STRATS}
+    strat_labels = {f"{s.name} ({s.category})": s.key for s in STRATS}
     default_keys = ["buy_and_hold", "sma_crossover", "rsi_mean_reversion", "time_series_momentum",
                     "random_forest", "lstm", "q_learning"]
     default_labels = [lbl for lbl, k in strat_labels.items() if k in default_keys]
@@ -140,8 +143,15 @@ def run_all(tickers, strategy_keys, period, cost_bps, capital, prefer):
 
 
 # ----------------------------------------------------------------------------
-# Tabs
+# Hero + tabs
 # ----------------------------------------------------------------------------
+hero(
+    "Trading Strategy Lab",
+    f"Comparing {len(STRATS)} strategies — trend, mean-reversion, momentum, ML, deep learning "
+    "& reinforcement learning — across live and historical stock data. Nothing here is a "
+    "frozen snapshot: prices refresh on demand and every model retrains walk-forward.",
+)
+
 tab_live, tab_backtest, tab_compare, tab_deep, tab_about = st.tabs(
     ["🔴 Live Market", "📈 Backtest & Equity Curves", "🏆 Model Comparison", "🔍 Deep Dive", "📚 Methodology"]
 )
@@ -149,7 +159,6 @@ tab_live, tab_backtest, tab_compare, tab_deep, tab_about = st.tabs(
 # ---- Live Market -------------------------------------------------------
 with tab_live:
     st.subheader("Live quotes")
-    st.caption("Pulled fresh on every refresh — not a static snapshot. Cached for 20s to be a polite API citizen.")
 
     if HAS_AUTOREFRESH and live_auto:
         st_autorefresh(interval=live_interval * 1000, key="live_autorefresh")
@@ -191,10 +200,10 @@ with tab_live:
                     intraday, src = pd.DataFrame(), "error"
                 if not intraday.empty:
                     fig = go.Figure(go.Scatter(x=intraday.index, y=intraday["Close"], mode="lines",
-                                                line=dict(width=2, color=CATEGORICAL[0]), fill="tozeroy",
-                                                fillcolor="rgba(42,120,214,0.08)"))
+                                                line=dict(width=2, color=CATEGORICAL[0])))
                     fig.update_layout(height=180, margin=dict(l=10, r=10, t=30, b=10), title=f"{t} · today ({src})",
                                        showlegend=False, xaxis_visible=False)
+                    fig.update_yaxes(autorange=True)
                     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
                 else:
                     st.info(f"No intraday data for {t} (market may be closed).")
@@ -341,7 +350,7 @@ with tab_about:
         cat_strats = [s for s in STRATS if s.category == cat]
         if not cat_strats:
             continue
-        st.markdown(f"### {cat}")
+        st.markdown(category_chip(cat), unsafe_allow_html=True)
         for s in cat_strats:
             with st.expander(s.name):
                 st.write(s.description)
@@ -357,7 +366,7 @@ with tab_about:
 - **Transaction costs**: a flat per-trade cost (basis points, configurable in the sidebar) is
   charged whenever a strategy changes its position.
 - **Data**: pulled live via `yfinance` (free, no key) with an optional Alpha Vantage fallback.
-  Historical caches expire every 60s (daily bars) / 20s (live quotes) so results reflect
+  Historical caches expire every 60s (daily bars) / 5s (live quotes) so results reflect
   current data, not a frozen snapshot.
 """)
     st.warning("Educational tool only — not investment advice. Backtested performance does not "
