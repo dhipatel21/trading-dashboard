@@ -58,6 +58,11 @@ Full descriptions + academic/open-source references are in the app's **Methodolo
   ML/DL models (Random Forest, Gradient Boosting, LSTM) report a genuine confidence
   (predicted-class probability); rule-based models show signal only. Also scans a configurable
   universe of tickers and ranks the top 10 each model currently favors long.
+- **Elliott Wave** — a full ZigZag pivot / impulse-correction / Fibonacci-cascade engine with a
+  walk-forward accuracy backtest and a composite "Top Setups" screener, all running live on
+  whatever ticker you pick (no embedded snapshot, no third-party connector). Includes the
+  original family-chat call log, playbook and methodology write-up this feature is based on.
+  See `src/elliott_wave.py` for the algorithm and `src/ew_content.py` for the static content.
 - **Methodology** — every strategy's description, reference, and the backtest assumptions.
 
 > **Auto-refresh note**: the "Auto-refresh live prices" toggle on the Live Market tab reruns

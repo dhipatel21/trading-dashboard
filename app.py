@@ -19,11 +19,17 @@ import plotly.graph_objects as go
 import plotly.express as px
 import streamlit as st
 
-from src.data_feed import get_history, get_live_quotes
+from src.data_feed import get_history, get_live_quote, get_live_quotes
 from src.strategies import all_strategies, get as get_strategy
 from src.backtest import backtest_strategy, leaderboard
-from src.theme import register_template, CATEGORICAL, DIVERGING, GOOD, CRITICAL
-from src.ui import inject_css, page_header, category_chip
+from src.theme import register_template, CATEGORICAL, DIVERGING, GOOD, WARNING, SERIOUS, CRITICAL
+from src.ui import (
+    inject_css, page_header, category_chip,
+    ew_badge, ew_stat_chip, ew_hr_tile, ew_cascade_row, ew_playbook_card, ew_disclaimer,
+    ew_outcome_badge, ew_revision_chain, ew_card_open, ew_card_close, PIVOT_HIGH, PIVOT_LOW,
+)
+from src import elliott_wave as ew
+from src import ew_content
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -217,8 +223,9 @@ page_header(
     "frozen snapshot: prices refresh on demand and every model retrains walk-forward.",
 )
 
-tab_live, tab_backtest, tab_compare, tab_deep, tab_predict, tab_about = st.tabs(
-    ["Live Market", "Backtest & Equity Curves", "Model Comparison", "Deep Dive", "Predictions", "Methodology"]
+tab_live, tab_backtest, tab_compare, tab_deep, tab_predict, tab_wave, tab_about = st.tabs(
+    ["Live Market", "Backtest & Equity Curves", "Model Comparison", "Deep Dive", "Predictions",
+     "Elliott Wave", "Methodology"]
 )
 
 # ---- Live Market -------------------------------------------------------
@@ -496,6 +503,325 @@ with tab_predict:
             st.dataframe(styled_top, width="stretch", hide_index=True)
     else:
         st.info("Click **Run Universe Scan** to rank the universe for each selected model.")
+
+# ---- Elliott Wave ----------------------------------------------------------
+EW_UNIVERSE_POOL = sorted(set(DEFAULT_UNIVERSE) | set(ew_content.PINNED_TICKERS))
+EW_DEFAULT_SCAN_UNIVERSE = ew_content.PINNED_TICKERS  # the family chat's own basket — fast, meaningful default
+
+if "ew_ticker" not in st.session_state:
+    st.session_state.ew_ticker = ew_content.BASKET_LEADER
+if "ew_thresholds" not in st.session_state:
+    st.session_state.ew_thresholds = {}
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def cached_ew_series(ticker: str, period: str, prefer: str):
+    df, source = get_history(ticker, period=period, interval="1d", prefer=prefer)
+    if df.empty or len(df) < 20:
+        return None, source
+    return ew.series_from_df(df), source
+
+
+def _ew_fit_desc(fit):
+    if not fit:
+        return "No qualifying fit at this sensitivity."
+    if fit["kind"] == "impulse":
+        dir_txt = "up" if fit["dir"] > 0 else "down"
+        diag = " (diagonal)" if fit["is_diagonal"] else ""
+        return f"5-wave impulse{diag}, {dir_txt}, confidence {fit['confidence']}%"
+    return f"3-wave correction (A-B-C), B retrace {fit['retr_b']:.0%}, confidence {fit['confidence']}%"
+
+
+def _ew_wave_tree_html(data):
+    outer, current, nested = data["outer_fit"], data["current_fit"], data["nested"]
+    html = '<ul class="ew-wtree degree-primary">'
+    html += (f'<li><div class="ew-wnode"><span class="label">Primary</span>'
+             f'<span class="desc">{_ew_fit_desc(outer)}</span></div>')
+    html += '<ul class="deg2">'
+    html += (f'<li><div class="ew-wnode"><span class="label">Intermediate</span>'
+             f'<span class="desc">{_ew_fit_desc(current)}</span>'
+             f'<span class="current">ACTIVE</span></div>')
+    if nested:
+        html += ('<ul class="deg3"><li><div class="ew-wnode"><span class="label">Minor</span>'
+                  f'<span class="desc">{_ew_fit_desc(nested)}</span></div></li></ul>')
+    html += "</li></ul></li></ul>"
+    return html
+
+
+def _ew_chart(ticker, series, data, live_quote=None):
+    dates = [p["date"] for p in series]
+    closes = [p["close"] for p in series]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=dates, y=closes, mode="lines", name="Daily close",
+                              line=dict(width=1.6, color=CATEGORICAL[0])))
+    pivots = data["pivots"]
+    fig.add_trace(go.Scatter(
+        x=[p["date"] for p in pivots], y=[p["price"] for p in pivots], mode="markers", name="ZigZag pivot",
+        marker=dict(size=7, color=[PIVOT_HIGH if p["type"] == "high" else PIVOT_LOW for p in pivots],
+                    line=dict(width=1, color="#0a0a0b")),
+    ))
+    # No per-line text annotations here — cascade levels can sit within a few dollars of each
+    # other, and Plotly's hline annotations don't do collision avoidance (they overlap into an
+    # unreadable jumble). The Target Cascade card alongside the chart already lists exact prices;
+    # the lines here just show where those zones sit relative to price, colored by kind.
+    for c in data["cascade"]:
+        color = PIVOT_LOW if c["kind"] == "retracement" else PIVOT_HIGH
+        fig.add_hline(y=c["price"], line=dict(color=color, width=1, dash="dot"), opacity=0.5)
+    title = f"{ticker} — price, ZigZag pivots & Fibonacci cascade"
+    if live_quote and live_quote.get("ok"):
+        title += f"  ·  live: ${live_quote['price']:,.2f}"
+    fig.update_layout(height=460, title=title, yaxis_title="Price ($)",
+                       legend=dict(orientation="h", yanchor="top", y=-0.12, xanchor="left", x=0))
+    return fig
+
+
+with tab_wave:
+    # ---- Header ----
+    basket_series, basket_thresholds = {}, {}
+    for tk in ew_content.PINNED_TICKERS:
+        s, _ = cached_ew_series(tk, period, prefer_source_key)
+        if s:
+            basket_series[tk] = s
+            basket_thresholds[tk] = st.session_state.ew_thresholds.get(tk, ew.DEFAULT_THRESHOLD_PCT)
+    basket = (ew.basket_agreement(ew_content.BASKET_LEADER, ew_content.PINNED_TICKERS, basket_series, basket_thresholds)
+              if ew_content.BASKET_LEADER in basket_series else None)
+
+    header_badges = ""
+    if basket:
+        bullish = basket["leader_phase"] == "bullish-impulse"
+        phase_txt = "Bullish / impulsive" if bullish else "Bearish / corrective"
+        header_badges = (ew_badge(f"{ew_content.BASKET_LEADER} phase: {phase_txt}", "good" if bullish else "warning")
+                          + " " + ew_badge(f"Basket agreement: {basket['matched']}/{basket['total']} ({basket['pct']}%)", "neutral"))
+
+    st.markdown(
+        ew_card_open()
+        + '<h1 style="font-size:1.3rem;margin:0 0 6px 0;color:#fff;">Elliott Wave Tracker</h1>'
+        + '<p class="ew-secondary ew-small" style="max-width:74ch;">A live Elliott Wave pivot/wave/target '
+          "engine — ZigZag pivot detection, impulse/correction rule classification, Fibonacci target cascades, "
+          "and a walk-forward accuracy backtest, running on real daily OHLC fetched on demand via this "
+          "dashboard's own live feed. Originally seeded by a family group chat's own calls on NDX, MU &amp; "
+          "AAOI — see the Call Log and Playbook further down.</p>"
+        + f'<div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:8px;">{header_badges}</div>'
+        + ew_card_close(),
+        unsafe_allow_html=True,
+    )
+
+    # ---- Top Setups screener ----
+    st.markdown(ew_card_open("Top Setups — algorithmic opportunity screener"), unsafe_allow_html=True)
+    st.markdown(ew_disclaimer(
+        "<strong>Algorithmic screener output derived purely from technical/Fibonacci heuristics on historical "
+        "end-of-day data. Not investment advice.</strong> The Model Accuracy backtest below shows this method "
+        "is right roughly 60-75% of the time depending on ticker and ratio — meaning it is also wrong a "
+        "substantial share of the time. Do your own research; consult a licensed financial advisor before "
+        "making investment decisions."
+    ), unsafe_allow_html=True)
+    st.caption("Ranks a scanned universe by a composite score built entirely from this tab's own wave-fit, "
+               "Fibonacci-cascade and backtest outputs — no separate forecasting logic. Exact formula in the "
+               "Methodology sub-tab below.")
+    ew_scan_universe = st.multiselect("Universe to scan", options=EW_UNIVERSE_POOL,
+                                       default=EW_DEFAULT_SCAN_UNIVERSE, key="ew_scan_universe")
+    if ew_scan_universe:
+        st.caption(f"This scan will run {len(ew_scan_universe)} tickers through the full wave-fit + backtest pipeline.")
+    scan_clicked = st.button("Recompute rankings", key="ew_scan_btn")
+    if scan_clicked and ew_scan_universe:
+        progress = st.progress(0.0, text="Scanning…")
+        series_by_ticker, threshold_by_ticker = {}, {}
+        for i, tk in enumerate(ew_scan_universe):
+            s, _ = cached_ew_series(tk, period, prefer_source_key)
+            if s:
+                series_by_ticker[tk] = s
+            threshold_by_ticker[tk] = st.session_state.ew_thresholds.get(tk, ew.DEFAULT_THRESHOLD_PCT)
+            progress.progress((i + 1) / len(ew_scan_universe), text=f"Scanning… {i + 1}/{len(ew_scan_universe)} · {tk}")
+        progress.empty()
+        st.session_state.ew_top_setups = ew.compute_top_setups(list(series_by_ticker.keys()), series_by_ticker,
+                                                                 threshold_by_ticker=threshold_by_ticker)
+        st.session_state.ew_top_setups_at = pd.Timestamp.now()
+
+    top_setups = st.session_state.get("ew_top_setups")
+    if top_setups:
+        st.caption(f"Computed {st.session_state.ew_top_setups_at.strftime('%Y-%m-%d %H:%M:%S')} · "
+                   f"{len(top_setups)} tickers scanned")
+
+        def _ew_setup_row(r):
+            return {
+                "Ticker": r["ticker"],
+                "Phase": {"bullish-impulse": "Bullish", "bearish-correction": "Bearish"}.get(r["phase"], "—"),
+                "Entry zone": f"${r['nearest_support']['price']:,.2f}" if r["nearest_support"] else "—",
+                "Next target": f"${r['nearest_upside']['price']:,.2f}" if r["nearest_upside"] else "—",
+                "Invalidation": f"${r['invalidation']:,.2f}" if r["invalidation"] is not None else "—",
+                "Risk/reward": f"{r['risk_reward']:.2f}",
+                "Confidence": f"{r['confidence']:.0f}%",
+                "Hist. hit-rate": f"{r['historical_reliability']:.0f}% ({r['hr_tier']})",
+                "Score": f"{r['score']:.1f}",
+            }
+
+        st.markdown("**Top 15**")
+        st.dataframe(pd.DataFrame([_ew_setup_row(r) for r in top_setups[:15]]), width="stretch", hide_index=True)
+        with st.expander(f"Weakest Setups — bottom {min(10, len(top_setups))} (shown for transparency)"):
+            st.dataframe(pd.DataFrame([_ew_setup_row(r) for r in top_setups[-10:]]), width="stretch", hide_index=True)
+    else:
+        st.info("Click **Recompute rankings** to run the screener across the selected universe.")
+    st.markdown(ew_card_close(), unsafe_allow_html=True)
+
+    # ---- Ticker picker ----
+    st.markdown("**Ticker**")
+    pin_cols = st.columns(len(ew_content.PINNED_TICKERS) + 1)
+    for i, tk in enumerate(ew_content.PINNED_TICKERS):
+        is_active = tk == st.session_state.ew_ticker
+        if pin_cols[i].button(tk, key=f"ew_pin_{tk}", type=("primary" if is_active else "secondary"), width="stretch"):
+            st.session_state.ew_ticker = tk
+    other_ticker = pin_cols[-1].text_input("Other ticker", value="", key="ew_other_ticker",
+                                            placeholder="Search any ticker…", label_visibility="collapsed")
+    if other_ticker.strip():
+        tk_upper = other_ticker.strip().upper()
+        if tk_upper != st.session_state.ew_ticker:
+            st.session_state.ew_ticker = tk_upper
+
+    active_ticker = st.session_state.ew_ticker
+    active_series, active_source = cached_ew_series(active_ticker, period, prefer_source_key)
+
+    if not active_series:
+        st.warning(f"No usable data for {active_ticker} — try a different ticker or data source.")
+    else:
+        current_threshold = st.session_state.ew_thresholds.get(active_ticker, ew.DEFAULT_THRESHOLD_PCT)
+        current_threshold = st.slider("Pivot sensitivity (lower = finer pivots)", 0.5, 10.0, current_threshold,
+                                       step=0.5, key=f"ew_thresh_{active_ticker}")
+        st.session_state.ew_thresholds[active_ticker] = current_threshold
+
+        ew_data = ew.compute_for_ticker(active_ticker, active_series, current_threshold)
+        live_quote = get_live_quote(active_ticker)
+        st.caption(f"Real daily OHLC via {active_source} · {len(active_series)} bars through {active_series[-1]['date']}")
+
+        chart_col, side_col = st.columns([2, 1])
+        with chart_col:
+            st.plotly_chart(_ew_chart(active_ticker, active_series, ew_data, live_quote), use_container_width=True)
+
+        with side_col:
+            st.markdown(ew_card_open("Target cascade (live)"), unsafe_allow_html=True)
+            if ew_data["cascade"]:
+                rows_html = "".join(
+                    ew_cascade_row(c["kind"], ew.RATIO_LABEL[c["ratio"]], f"{c['price']:,.2f}", c["wave_tag"])
+                    for c in ew_data["cascade"]
+                )
+                st.markdown(rows_html, unsafe_allow_html=True)
+            else:
+                st.caption("Not enough pivots yet to build a cascade at this sensitivity.")
+            st.markdown(ew_card_close(), unsafe_allow_html=True)
+
+            st.markdown(ew_card_open("Wave degree tree"), unsafe_allow_html=True)
+            st.markdown(_ew_wave_tree_html(ew_data), unsafe_allow_html=True)
+            st.markdown(ew_card_close(), unsafe_allow_html=True)
+
+        if basket:
+            st.markdown(ew_card_open("Basket agreement"), unsafe_allow_html=True)
+            st.caption(f"NDX/MU/AAOI/NVDA/CRWD/ARM/AEHR — {ew_content.BASKET_LEADER}'s phase is "
+                       f"{'bullish-impulse' if basket['leader_phase']=='bullish-impulse' else basket['leader_phase']}; "
+                       f"{basket['matched']}/{basket['total']} of the rest agree.")
+            badge_html = " ".join(
+                ew_badge(f"{s['ticker']}: {'match' if s['is_match'] else 'diverges'}", "good" if s["is_match"] else "serious")
+                for s in basket["scored"]
+            )
+            st.markdown(badge_html, unsafe_allow_html=True)
+            st.markdown(ew_card_close(), unsafe_allow_html=True)
+
+        # ---- Model accuracy backtest ----
+        st.markdown(ew_card_open("Model accuracy — walk-forward Fibonacci-target backtest"), unsafe_allow_html=True)
+        st.caption("Every ZigZag pivot generates a Fibonacci target cascade using only price data available up "
+                   "to that pivot's own confirmation bar, then checks whether price actually touched each "
+                   "target within a forward window — walk-forward / no-lookahead by construction.")
+        bt_scope = st.radio("Scope", ["This ticker", "Scanned universe"], horizontal=True, key="ew_bt_scope")
+        bcol1, bcol2 = st.columns(2)
+        bt_window = bcol1.slider("Forward window (trading days)", 5, 60, 20, key="ew_bt_window")
+        bt_tolerance = bcol2.slider("Tolerance band (±%)", 0.25, 2.0, 0.5, step=0.25, key="ew_bt_tolerance")
+
+        agg = None
+        if bt_scope == "This ticker":
+            records = ew.backtest_ticker(active_ticker, active_series, bt_window, bt_tolerance)
+            agg = ew.aggregate_backtest(records)
+        else:
+            run_bt_scan = st.button("Run universe backtest", key="ew_bt_scan_btn")
+            if run_bt_scan:
+                bt_records = []
+                for tk in ew_scan_universe:
+                    s, _ = cached_ew_series(tk, period, prefer_source_key)
+                    if s:
+                        bt_records.extend(ew.backtest_ticker(tk, s, bt_window, bt_tolerance))
+                st.session_state.ew_bt_records = bt_records
+            if "ew_bt_records" in st.session_state:
+                agg = ew.aggregate_backtest(st.session_state.ew_bt_records)
+            else:
+                st.info("Click **Run universe backtest** to aggregate across the scanned universe above.")
+
+        if agg and agg["n"]:
+            t1, t2, t3, t4 = st.columns(4)
+            t1.markdown(ew_hr_tile(f"{agg['rate']:.0%}", "Overall hit-rate", f"N = {agg['n']}"), unsafe_allow_html=True)
+            t2.markdown(ew_hr_tile(f"{agg['mean_days']:.1f}" if agg["mean_days"] else "—", "Mean days-to-hit",
+                                    "among hits"), unsafe_allow_html=True)
+            t3.markdown(ew_hr_tile(f"{agg['median_days']:.1f}" if agg["median_days"] else "—", "Median days-to-hit",
+                                    "less outlier-sensitive"), unsafe_allow_html=True)
+            t4.markdown(ew_hr_tile(str(agg["pivot_count"]), "Pivots tested", "at this configuration"), unsafe_allow_html=True)
+
+            rc1, rc2 = st.columns(2)
+            with rc1:
+                st.markdown("**Hit-rate by Fibonacci ratio**")
+                ratio_rows = [{"Ratio": ew.RATIO_LABEL[r], "Kind": d["kind"], "N": d["n"], "Hits": d["hits"],
+                               "Hit-rate": f"{d['hits']/d['n']*100:.0f}%" if d["n"] else "—"}
+                              for r, d in agg["by_ratio"].items()]
+                st.dataframe(pd.DataFrame(ratio_rows), width="stretch", hide_index=True)
+            with rc2:
+                st.markdown("**Hit-rate by confidence quartile**")
+                q_rows = [{"Quartile": q["label"], "Range": f"{q['range'][0]:.0f}–{q['range'][1]:.0f}",
+                           "N": q["n"], "Hits": q["hits"], "Hit-rate": f"{q['hits']/q['n']*100:.0f}%" if q["n"] else "—"}
+                          for q in agg["by_quartile"]]
+                st.dataframe(pd.DataFrame(q_rows), width="stretch", hide_index=True)
+            st.caption("A percentage is never shown here without its N. Quartile boundaries are recomputed "
+                       "fresh for whichever scope is active — not shared across scopes.")
+        elif agg is not None:
+            st.info("Not enough resolved pivots at this configuration to compute a backtest yet.")
+        st.markdown(ew_card_close(), unsafe_allow_html=True)
+
+    # ---- Family Chat Call Log ----
+    st.markdown(ew_card_open("Family Chat Call Log — self-reported outcomes"), unsafe_allow_html=True)
+    st.caption("Every dated call extracted from the source chat, reproduced as stated, with outcomes as noted "
+               "in the chat's own later texts — historical chat content, self-reported and informally graded, "
+               "not live algorithm output and not the rigorous backtest above. Treat the two hit-rates as "
+               "measuring two different things.")
+    resolutions = [row[6] for row in ew_content.CALL_LOG]
+    hit_n, revised_n, excluded_n = resolutions.count("hit"), resolutions.count("revised"), resolutions.count("excluded")
+    denom = hit_n + revised_n
+    lc1, lc2, lc3, lc4 = st.columns(4)
+    lc1.markdown(ew_hr_tile(f"{hit_n/denom*100:.0f}%" if denom else "—%", "Computed hit-rate", f"N = {denom}"), unsafe_allow_html=True)
+    lc2.markdown(ew_hr_tile(str(hit_n), "Hit / roughly-hit", "counted in the numerator"), unsafe_allow_html=True)
+    lc3.markdown(ew_hr_tile(str(revised_n), "Revised / superseded", "resolved, not as originally stated"), unsafe_allow_html=True)
+    lc4.markdown(ew_hr_tile(str(excluded_n), "Pending / standing", "excluded from the denominator"), unsafe_allow_html=True)
+    call_df = pd.DataFrame([
+        {"Date/time": d, "Ticker": t, "Wave label": w, "Target/range": tg, "Timeframe": tf, "Outcome": o, "Resolution": r}
+        for (d, t, w, tg, tf, o, r) in ew_content.CALL_LOG
+    ])
+    st.dataframe(call_df, width="stretch", hide_index=True, height=360)
+    st.markdown(ew_card_close(), unsafe_allow_html=True)
+
+    # ---- Playbook / Methodology ----
+    ew_pb_tab, ew_method_tab = st.tabs(["Playbook", "Methodology (technical)"])
+    with ew_pb_tab:
+        st.markdown(ew_card_open("Playbook — the method observed in the chat"), unsafe_allow_html=True)
+        cards_html = "".join(ew_playbook_card(n, title, text) for (n, title, text) in ew_content.PLAYBOOK)
+        st.markdown(f'<div class="ew-playbook-grid">{cards_html}</div>', unsafe_allow_html=True)
+        st.markdown(ew_card_close(), unsafe_allow_html=True)
+    with ew_method_tab:
+        st.markdown(ew_card_open() + f'<div class="ew-methodology">{ew_content.METHODOLOGY_HTML}</div>' + ew_card_close(),
+                    unsafe_allow_html=True)
+
+    # ---- Caveats ----
+    st.markdown(ew_card_open("Caveats — read this before believing any of it"), unsafe_allow_html=True)
+    for title, body, chain in ew_content.CAVEATS:
+        block = f'<div style="margin-bottom:14px;"><strong style="color:#fff;">{title}</strong>'
+        block += f'<p class="ew-secondary ew-small" style="margin-top:4px;">{body}</p>'
+        if chain:
+            block += ew_revision_chain(chain)
+        block += "</div>"
+        st.markdown(block, unsafe_allow_html=True)
+    st.markdown(ew_card_close(), unsafe_allow_html=True)
 
 # ---- Methodology ----------------------------------------------------------
 with tab_about:

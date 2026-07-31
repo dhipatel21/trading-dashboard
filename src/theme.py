@@ -22,6 +22,7 @@ DIVERGING = ["#184f95", "#3987e5", "#6da7ec", "#383835", "#e08f76", "#e66767", "
 
 GOOD = "#0ca30c"
 WARNING = "#fab219"
+SERIOUS = "#ec835a"
 CRITICAL = "#e66767"
 
 SURFACE_DARK = "#1a1a19"
