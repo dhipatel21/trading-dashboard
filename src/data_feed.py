@@ -107,9 +107,14 @@ def get_history(ticker: str, period: str = "2y", interval: str = "1d", prefer: s
     return pd.DataFrame(), "none"
 
 
-@st.cache_data(ttl=20, show_spinner=False)
+@st.cache_data(ttl=5, show_spinner=False)
 def get_live_quote(ticker: str) -> dict:
-    """Fast, low-latency-ish quote for the 'Live Market' view (20s cache)."""
+    """Fast, low-latency-ish quote for the 'Live Market' view (5s cache).
+
+    5s is close to the practical floor for yfinance: Yahoo's own quote feed
+    doesn't tick faster than that for most symbols, and polling much harder
+    risks IP-level rate-limiting since this hits an unofficial endpoint.
+    """
     try:
         t = yf.Ticker(ticker)
         fi = t.fast_info

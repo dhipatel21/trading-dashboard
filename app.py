@@ -99,7 +99,7 @@ with st.sidebar:
 
     st.subheader("Live view")
     live_auto = st.checkbox("Auto-refresh live prices", value=HAS_AUTOREFRESH)
-    live_interval = st.slider("Refresh every (seconds)", 5, 60, 15, disabled=not HAS_AUTOREFRESH)
+    live_interval = st.slider("Refresh every (seconds)", 2, 60, 5, disabled=not HAS_AUTOREFRESH)
     if not HAS_AUTOREFRESH:
         st.caption("Install `streamlit-autorefresh` for automatic polling; use the manual refresh button below for now.")
 
