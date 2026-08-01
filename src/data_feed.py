@@ -26,20 +26,24 @@ def _get_av_key() -> str | None:
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_history_yf(ticker: str, period: str = "2y", interval: str = "1d") -> pd.DataFrame:
-    """Historical OHLCV via yfinance. TTL=60s so 'live' views actually refresh."""
-    df = yf.download(
-        ticker,
-        period=period,
-        interval=interval,
-        auto_adjust=True,
-        progress=False,
-        multi_level_index=False,
-    )
+    """Historical OHLCV via yfinance. TTL=60s so 'live' views actually refresh.
+
+    Uses Ticker.history(), not the module-level yf.download() — the latter shares
+    internal batching/session state across calls that is NOT thread-safe: under
+    concurrent fetches (see the Elliott Wave tab's universe scan) it was silently
+    cross-contaminating results between tickers (confirmed directly — two unrelated
+    tickers fetched concurrently came back with identical prices). Ticker.history()
+    does not share that state and returns correct, independent results per ticker.
+    """
+    df = yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=True)
     if df is None or df.empty:
         return pd.DataFrame()
     df = df.rename(columns=str.title)
+    if df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
     df.index.name = "Date"
-    return df
+    keep = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
+    return df[keep]
 
 
 @st.cache_data(ttl=300, show_spinner=False)

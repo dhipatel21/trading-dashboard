@@ -10,6 +10,7 @@ Run with:  streamlit run app.py
 from __future__ import annotations
 
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -507,8 +508,40 @@ with tab_predict:
         st.info("Click **Run Universe Scan** to rank the universe for each selected model.")
 
 # ---- Elliott Wave ----------------------------------------------------------
-EW_UNIVERSE_POOL = sorted(set(DEFAULT_UNIVERSE) | set(ew_content.PINNED_TICKERS))
-EW_DEFAULT_SCAN_UNIVERSE = EW_UNIVERSE_POOL  # scan everything by default, not just the pinned basket
+# A broad, fixed scan universe spanning both exchanges and every major sector — not a
+# user-editable selection. Literally every NYSE/NASDAQ ticker (~8,000+) isn't practical to
+# fetch live and wave-fit one at a time; this ~250-name subset (S&P 500 / Nasdaq-100 style)
+# is the practical "much larger subset" tradeoff, fetched concurrently (see _ew_fetch_universe).
+EW_SCAN_UNIVERSE = sorted(set(DEFAULT_UNIVERSE) | set(ew_content.PINNED_TICKERS) | {
+    # Mega/large-cap tech & Nasdaq-100 core
+    "GOOG", "TXN", "INTU", "AMGN", "HON", "BKNG", "GILD", "MDLZ", "ADI", "VRTX", "PYPL", "REGN",
+    "LRCX", "PANW", "KLAC", "SNPS", "CDNS", "MELI", "MAR", "ORLY", "CTAS", "MNST", "ABNB", "FTNT",
+    "WDAY", "PCAR", "ROP", "NXPI", "MRVL", "DXCM", "ODFL", "PAYX", "KDP", "CPRT", "FAST", "BIIB",
+    "IDXX", "EA", "VRSK", "GEHC", "CTSH", "XEL", "ANSS", "ZS", "TTD", "TEAM", "DDOG", "ILMN",
+    "WBD", "ENPH", "SIRI", "JD", "LULU", "MCHP", "ALGN",
+    # Dow 30 / blue chips
+    "UNH", "GS", "TRV", "MMM", "AXP", "DIS", "DOW",
+    # Financials
+    "WFC", "C", "MS", "SCHW", "BLK", "SPGI", "CB", "PGR", "MMC", "ICE", "CME", "AON", "PNC",
+    "USB", "TFC", "COF", "BK", "AIG", "MET", "PRU",
+    # Healthcare
+    "LLY", "ABBV", "TMO", "ABT", "DHR", "BMY", "MDT", "CI", "ELV", "HUM", "ISRG", "SYK", "ZTS",
+    "BSX", "HCA", "CVS",
+    # Consumer
+    "TGT", "CL", "KMB", "GIS", "HSY", "STZ", "MO", "PM", "EL", "TJX", "ROST", "YUM", "DG",
+    # Industrials
+    "RTX", "LMT", "NOC", "GD", "UPS", "NSC", "DE", "EMR", "ETN", "ITW", "PH", "CMI", "WM",
+    # Energy
+    "COP", "SLB", "EOG", "MPC", "PSX", "VLO", "OXY", "WMB", "KMI",
+    # Materials
+    "LIN", "APD", "SHW", "ECL", "NEM",
+    # Utilities
+    "NEE", "DUK", "SO", "D",
+    # Real estate
+    "PLD", "AMT", "EQIX", "PSA", "O", "SPG", "WELL", "DLR",
+    # Communication services
+    "CMCSA", "TMUS",
+})
 
 if "ew_ticker" not in st.session_state:
     st.session_state.ew_ticker = ew_content.BASKET_LEADER
@@ -522,6 +555,35 @@ def cached_ew_series(ticker: str, period: str, prefer: str):
     if df.empty or len(df) < 20:
         return None, source
     return ew.series_from_df(df), source
+
+
+def _ew_fetch_universe(tickers: list[str], period: str, prefer: str, label: str, max_workers: int = 4) -> dict:
+    """Fetch many tickers' series concurrently (network I/O bound — yfinance calls release the
+    GIL, so threads meaningfully cut wall-clock time at this universe size vs. sequential
+    fetching). Kept to a modest worker count: yfinance shares one session/auth "crumb" across
+    the whole process, and hitting it with too much concurrency at once causes spurious 401s
+    (crumb-invalidation races between threads), not just ordinary rate-limiting. Failed tickers
+    are simply dropped — the caller reports how many of the total actually returned data, same
+    as everywhere else in this app that touches yfinance. Streamlit UI calls (the progress bar)
+    stay on the main thread; only the fetch itself runs in workers."""
+    series_by_ticker = {}
+    total = len(tickers)
+    progress = st.progress(0.0, text=f"{label}… 0/{total}")
+    done = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(cached_ew_series, tk, period, prefer): tk for tk in tickers}
+        for future in as_completed(futures):
+            tk = futures[future]
+            try:
+                s, _ = future.result()
+                if s:
+                    series_by_ticker[tk] = s
+            except Exception:  # noqa: BLE001 — a single ticker failing shouldn't kill the scan
+                pass
+            done += 1
+            progress.progress(done / total, text=f"{label}… {done}/{total} · {tk}")
+    progress.empty()
+    return series_by_ticker
 
 
 def _ew_fit_desc(fit):
@@ -656,24 +718,14 @@ with tab_wave:
         "substantial share of the time. Do your own research; consult a licensed financial advisor before "
         "making investment decisions."
     ), unsafe_allow_html=True)
-    st.caption("Ranks a scanned universe by a composite score built entirely from this tab's own wave-fit, "
-               "Fibonacci-cascade and backtest outputs — no separate forecasting logic. Exact formula in the "
-               "Methodology sub-tab below.")
-    ew_scan_universe = st.multiselect("Universe to scan", options=EW_UNIVERSE_POOL,
-                                       default=EW_DEFAULT_SCAN_UNIVERSE, key="ew_scan_universe")
-    if ew_scan_universe:
-        st.caption(f"This scan will run {len(ew_scan_universe)} tickers through the full wave-fit + backtest pipeline.")
+    st.caption(f"Ranks a fixed, broad universe of {len(EW_SCAN_UNIVERSE)} liquid NYSE/NASDAQ tickers across every "
+               "major sector by a composite score built entirely from this tab's own wave-fit, Fibonacci-cascade "
+               "and backtest outputs — no separate forecasting logic, no manual universe selection. Exact formula "
+               "in the Methodology sub-tab below. Fetched concurrently, but a cold run still takes a minute or two.")
     scan_clicked = st.button("Recompute rankings", key="ew_scan_btn")
-    if scan_clicked and ew_scan_universe:
-        progress = st.progress(0.0, text="Scanning…")
-        series_by_ticker, threshold_by_ticker = {}, {}
-        for i, tk in enumerate(ew_scan_universe):
-            s, _ = cached_ew_series(tk, period, prefer_source_key)
-            if s:
-                series_by_ticker[tk] = s
-            threshold_by_ticker[tk] = st.session_state.ew_thresholds.get(tk, ew.DEFAULT_THRESHOLD_PCT)
-            progress.progress((i + 1) / len(ew_scan_universe), text=f"Scanning… {i + 1}/{len(ew_scan_universe)} · {tk}")
-        progress.empty()
+    if scan_clicked:
+        series_by_ticker = _ew_fetch_universe(EW_SCAN_UNIVERSE, period, prefer_source_key, "Scanning")
+        threshold_by_ticker = {tk: st.session_state.ew_thresholds.get(tk, ew.DEFAULT_THRESHOLD_PCT) for tk in EW_SCAN_UNIVERSE}
         st.session_state.ew_top_setups = ew.compute_top_setups(list(series_by_ticker.keys()), series_by_ticker,
                                                                  threshold_by_ticker=threshold_by_ticker)
         st.session_state.ew_top_setups_at = pd.Timestamp.now()
@@ -681,7 +733,7 @@ with tab_wave:
     top_setups = st.session_state.get("ew_top_setups")
     if top_setups:
         st.caption(f"Computed {st.session_state.ew_top_setups_at.strftime('%Y-%m-%d %H:%M:%S')} · "
-                   f"{len(top_setups)} tickers scanned")
+                   f"{len(top_setups)}/{len(EW_SCAN_UNIVERSE)} tickers returned usable data")
 
         def _ew_setup_row(r):
             return [
@@ -703,7 +755,7 @@ with tab_wave:
             st.markdown(ew_html_table(ts_headers, [_ew_setup_row(r) for r in top_setups[-10:]], num_cols={2, 3, 4, 5, 6, 7, 8}),
                         unsafe_allow_html=True)
     else:
-        st.info("Click **Recompute rankings** to run the screener across the selected universe.")
+        st.info("Click **Recompute rankings** to run the screener across the full universe.")
     st.markdown(ew_card_close(), unsafe_allow_html=True)
 
     # ---- Ticker picker ----
@@ -772,7 +824,8 @@ with tab_wave:
         st.caption("Every ZigZag pivot generates a Fibonacci target cascade using only price data available up "
                    "to that pivot's own confirmation bar, then checks whether price actually touched each "
                    "target within a forward window — walk-forward / no-lookahead by construction.")
-        bt_scope = st.radio("Scope", ["This ticker", "Scanned universe"], horizontal=True, key="ew_bt_scope")
+        bt_scope = st.radio("Scope", ["This ticker", f"Full universe ({len(EW_SCAN_UNIVERSE)} tickers)"],
+                             horizontal=True, key="ew_bt_scope")
         bcol1, bcol2 = st.columns(2)
         bt_window = bcol1.slider("Forward window (trading days)", 5, 60, 20, key="ew_bt_window")
         bt_tolerance = bcol2.slider("Tolerance band (±%)", 0.25, 2.0, 0.5, step=0.25, key="ew_bt_tolerance")
@@ -782,18 +835,17 @@ with tab_wave:
             records = ew.backtest_ticker(active_ticker, active_series, bt_window, bt_tolerance)
             agg = ew.aggregate_backtest(records)
         else:
-            run_bt_scan = st.button("Run universe backtest", key="ew_bt_scan_btn")
+            run_bt_scan = st.button("Run full-universe backtest", key="ew_bt_scan_btn")
             if run_bt_scan:
+                bt_series = _ew_fetch_universe(EW_SCAN_UNIVERSE, period, prefer_source_key, "Backtesting")
                 bt_records = []
-                for tk in ew_scan_universe:
-                    s, _ = cached_ew_series(tk, period, prefer_source_key)
-                    if s:
-                        bt_records.extend(ew.backtest_ticker(tk, s, bt_window, bt_tolerance))
+                for tk, s in bt_series.items():
+                    bt_records.extend(ew.backtest_ticker(tk, s, bt_window, bt_tolerance))
                 st.session_state.ew_bt_records = bt_records
             if "ew_bt_records" in st.session_state:
                 agg = ew.aggregate_backtest(st.session_state.ew_bt_records)
             else:
-                st.info("Click **Run universe backtest** to aggregate across the scanned universe above.")
+                st.info("Click **Run full-universe backtest** to aggregate across all scanned tickers.")
 
         if agg and agg["n"]:
             t1, t2, t3, t4 = st.columns(4)
