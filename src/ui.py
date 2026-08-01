@@ -251,18 +251,23 @@ def inject_css():
     .ew-cascade-row .ratio {{ color: #898781; font-size: 0.72rem; }}
     .ew-cascade-row .tag {{ color: #c3c2b7; font-size: 0.72rem; }}
 
-    .ew-wtree, .ew-wtree ul {{ list-style: none; margin: 0; padding-left: 16px; }}
+    .ew-wtree, .ew-wtree ul {{ list-style: none; margin: 0; padding-left: 18px; }}
     .ew-wtree {{ padding-left: 0; }}
-    .ew-wtree li {{ margin: 3px 0; padding: 5px 0 5px 12px; border-left: 2px solid #2c2c2a; }}
-    .ew-wtree.degree-primary {{ border-left-color: {CATEGORICAL[0]}; }}
-    .ew-wtree.degree-intermediate {{ border-left-color: {CATEGORICAL[4]}; }}
-    .ew-wtree.degree-minor {{ border-left-color: {CATEGORICAL[3]}; }}
+    .ew-wtree li {{ margin: 4px 0; padding: 6px 0 6px 14px; border-left: 3px solid {CATEGORICAL[0]}; }}
+    .ew-wtree .deg2 {{ margin-top: 4px; }}
+    .ew-wtree .deg2 > li {{ border-left-color: {CATEGORICAL[4]}; }}
+    .ew-wtree .deg3 {{ margin-top: 4px; }}
+    .ew-wtree .deg3 > li {{ border-left-color: {CATEGORICAL[3]}; }}
     .ew-wnode {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }}
-    .ew-wnode .label {{ font-weight: 650; font-size: 0.8rem; color: #fff; }}
-    .ew-wnode .desc {{ color: #c3c2b7; font-size: 0.72rem; }}
+    .ew-wnode .label {{
+        font-weight: 700; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em;
+        color: #898781; min-width: 82px;
+    }}
+    .ew-wnode .desc {{ color: #e8e7e2; font-size: 0.8rem; }}
     .ew-wnode .current {{
         font-size: 0.62rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em;
-        color: {GOOD}; border: 1px solid {GOOD}; border-radius: 999px; padding: 1px 7px;
+        color: {GOOD}; border: 1px solid {GOOD}; border-radius: 999px; padding: 2px 8px;
+        background: rgba(12,163,12,0.12);
     }}
 
     .ew-playbook-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(220px,1fr)); gap: 12px; margin-top: 6px; }}
@@ -302,6 +307,25 @@ def inject_css():
     .ew-methodology ul {{ margin: 4px 0 8px; padding-left: 20px; }}
     .ew-methodology li {{ margin-bottom: 4px; }}
     .ew-methodology strong {{ color: #fff; }}
+
+    /* ---- HTML tables (pill badges need real HTML — st.dataframe can't render them in-cell) ---- */
+    .ew-table-wrap {{
+        overflow: auto; max-height: 460px; border: 1px solid rgba(255,255,255,0.09);
+        border-radius: 10px; margin-top: 4px;
+    }}
+    table.ew-table {{ border-collapse: collapse; width: 100%; font-size: 0.78rem; }}
+    table.ew-table thead th {{
+        position: sticky; top: 0; background: #16161a; text-align: left; color: #898781;
+        font-weight: 700; text-transform: uppercase; font-size: 0.66rem; letter-spacing: 0.04em;
+        padding: 9px 11px; border-bottom: 1px solid rgba(255,255,255,0.09); white-space: nowrap;
+    }}
+    table.ew-table tbody td {{
+        padding: 8px 11px; border-bottom: 1px solid rgba(255,255,255,0.06); vertical-align: middle;
+        color: #c3c2b7;
+    }}
+    table.ew-table tbody tr:last-child td {{ border-bottom: none; }}
+    table.ew-table tbody tr:hover td {{ background: rgba(57,135,229,0.06); }}
+    table.ew-table td.num {{ font-family: {MONO_FONT}; font-variant-numeric: tabular-nums; white-space: nowrap; }}
     </style>
     """, unsafe_allow_html=True)
 
@@ -391,6 +415,25 @@ def ew_revision_chain(steps: list[str]) -> str:
             parts.append('<span class="ew-revision-arrow">→</span>')
         parts.append(f'<span class="ew-revision-chip">{s}</span>')
     return f'<div class="ew-revision-chain">{"".join(parts)}</div>'
+
+
+def ew_phase_badge(phase: str) -> str:
+    if phase == "bullish-impulse":
+        return ew_badge("Bullish", "good")
+    if phase == "bearish-correction":
+        return ew_badge("Bearish", "warning")
+    return ew_badge("Unclear", "neutral")
+
+
+def ew_html_table(headers: list[str], rows: list[list[str]], num_cols: set[int] | None = None) -> str:
+    """rows: list of lists of already-rendered cell HTML (plain text or badge spans)."""
+    num_cols = num_cols or set()
+    head = "".join(f"<th>{h}</th>" for h in headers)
+    body = ""
+    for row in rows:
+        cells = "".join(f'<td class="num">{c}</td>' if i in num_cols else f"<td>{c}</td>" for i, c in enumerate(row))
+        body += f"<tr>{cells}</tr>"
+    return f'<div class="ew-table-wrap"><table class="ew-table"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
 
 
 def ew_card_open(title: str | None = None) -> str:

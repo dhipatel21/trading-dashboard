@@ -10,6 +10,7 @@ Run with:  streamlit run app.py
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -26,7 +27,8 @@ from src.theme import register_template, CATEGORICAL, DIVERGING, GOOD, WARNING, 
 from src.ui import (
     inject_css, page_header, category_chip,
     ew_badge, ew_stat_chip, ew_hr_tile, ew_cascade_row, ew_playbook_card, ew_disclaimer,
-    ew_outcome_badge, ew_revision_chain, ew_card_open, ew_card_close, PIVOT_HIGH, PIVOT_LOW,
+    ew_outcome_badge, ew_revision_chain, ew_phase_badge, ew_html_table,
+    ew_card_open, ew_card_close, PIVOT_HIGH, PIVOT_LOW,
 )
 from src import elliott_wave as ew
 from src import ew_content
@@ -506,7 +508,7 @@ with tab_predict:
 
 # ---- Elliott Wave ----------------------------------------------------------
 EW_UNIVERSE_POOL = sorted(set(DEFAULT_UNIVERSE) | set(ew_content.PINNED_TICKERS))
-EW_DEFAULT_SCAN_UNIVERSE = ew_content.PINNED_TICKERS  # the family chat's own basket — fast, meaningful default
+EW_DEFAULT_SCAN_UNIVERSE = EW_UNIVERSE_POOL  # scan everything by default, not just the pinned basket
 
 if "ew_ticker" not in st.session_state:
     st.session_state.ew_ticker = ew_content.BASKET_LEADER
@@ -548,29 +550,68 @@ def _ew_wave_tree_html(data):
     return html
 
 
+def _add_trading_days(date_str: str, n: int) -> str:
+    """Add n WEEKDAY (Mon-Fri) days — approximates trading days (no market-holiday calendar),
+    used only to give the chart's forward projection region a plausible x-axis span."""
+    d = datetime.strptime(date_str, "%Y-%m-%d")
+    added = 0
+    while added < n:
+        d += timedelta(days=1)
+        if d.weekday() < 5:
+            added += 1
+    return d.strftime("%Y-%m-%d")
+
+
 def _ew_chart(ticker, series, data, live_quote=None):
     dates = [p["date"] for p in series]
     closes = [p["close"] for p in series]
+    pivots = data["pivots"]
+    last_date, last_price = dates[-1], closes[-1]
+    proj_end_date = _add_trading_days(last_date, 20)
+
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=dates, y=closes, mode="lines", name="Daily close",
-                              line=dict(width=1.6, color=CATEGORICAL[0])))
-    pivots = data["pivots"]
+                              line=dict(width=1.3, color=CATEGORICAL[0]), opacity=0.55))
+    # The ZigZag connector — pivot-to-pivot — is the actual wave shape overlaid on daily price.
     fig.add_trace(go.Scatter(
-        x=[p["date"] for p in pivots], y=[p["price"] for p in pivots], mode="markers", name="ZigZag pivot",
+        x=[p["date"] for p in pivots], y=[p["price"] for p in pivots], mode="lines+markers", name="ZigZag wave",
+        line=dict(color="#e8e7e2", width=2, dash="solid"),
         marker=dict(size=7, color=[PIVOT_HIGH if p["type"] == "high" else PIVOT_LOW for p in pivots],
                     line=dict(width=1, color="#0a0a0b")),
     ))
-    # No per-line text annotations here — cascade levels can sit within a few dollars of each
-    # other, and Plotly's hline annotations don't do collision avoidance (they overlap into an
-    # unreadable jumble). The Target Cascade card alongside the chart already lists exact prices;
-    # the lines here just show where those zones sit relative to price, colored by kind.
+
+    # Fibonacci cascade: horizontal segments anchored at the current point and extending across
+    # the projection window, colored by kind — red/dotted for retracement (downside), blue/dotted
+    # for extension (upside). Anchored (not spanning the full chart) so they read as forward
+    # targets from "now," and no per-line text label (levels can sit a few dollars apart — text
+    # would overlap into a jumble; the Target Cascade card alongside gives exact prices).
     for c in data["cascade"]:
         color = PIVOT_LOW if c["kind"] == "retracement" else PIVOT_HIGH
-        fig.add_hline(y=c["price"], line=dict(color=color, width=1, dash="dot"), opacity=0.5)
-    title = f"{ticker} — price, ZigZag pivots & Fibonacci cascade"
+        fig.add_shape(type="line", x0=last_date, x1=proj_end_date, y0=c["price"], y1=c["price"],
+                      line=dict(color=color, width=1.5, dash="dot"), opacity=0.65)
+
+    # Projected next wave: a dashed line from the current point toward the nearest Fibonacci
+    # target in the direction implied by the last confirmed pivot (after a low, the next expected
+    # leg is up toward the nearest extension target; after a high, down toward the nearest
+    # retracement target). This is a projection, not a fact — styled dashed and clearly labeled.
+    if pivots:
+        last_pivot_type = pivots[-1]["type"]
+        if last_pivot_type == "low":
+            proj_target, proj_color = ew._nearest_upside(data["cascade"], last_price), PIVOT_HIGH
+        else:
+            proj_target, proj_color = ew._nearest_support(data["cascade"], last_price), PIVOT_LOW
+        if proj_target:
+            fig.add_trace(go.Scatter(
+                x=[last_date, proj_end_date], y=[last_price, proj_target["price"]],
+                mode="lines+markers", name="Projected next wave",
+                line=dict(color=proj_color, width=2.5, dash="dash"),
+                marker=dict(size=[0, 10], symbol=["circle", "star"], color=proj_color),
+            ))
+
+    title = f"{ticker} — price, ZigZag wave & Fibonacci cascade"
     if live_quote and live_quote.get("ok"):
         title += f"  ·  live: ${live_quote['price']:,.2f}"
-    fig.update_layout(height=460, title=title, yaxis_title="Price ($)",
+    fig.update_layout(height=480, title=title, yaxis_title="Price ($)",
                        legend=dict(orientation="h", yanchor="top", y=-0.12, xanchor="left", x=0))
     return fig
 
@@ -643,22 +684,24 @@ with tab_wave:
                    f"{len(top_setups)} tickers scanned")
 
         def _ew_setup_row(r):
-            return {
-                "Ticker": r["ticker"],
-                "Phase": {"bullish-impulse": "Bullish", "bearish-correction": "Bearish"}.get(r["phase"], "—"),
-                "Entry zone": f"${r['nearest_support']['price']:,.2f}" if r["nearest_support"] else "—",
-                "Next target": f"${r['nearest_upside']['price']:,.2f}" if r["nearest_upside"] else "—",
-                "Invalidation": f"${r['invalidation']:,.2f}" if r["invalidation"] is not None else "—",
-                "Risk/reward": f"{r['risk_reward']:.2f}",
-                "Confidence": f"{r['confidence']:.0f}%",
-                "Hist. hit-rate": f"{r['historical_reliability']:.0f}% ({r['hr_tier']})",
-                "Score": f"{r['score']:.1f}",
-            }
+            return [
+                f"<strong style='color:#fff;'>{r['ticker']}</strong>", ew_phase_badge(r["phase"]),
+                f"${r['nearest_support']['price']:,.2f}" if r["nearest_support"] else "—",
+                f"${r['nearest_upside']['price']:,.2f}" if r["nearest_upside"] else "—",
+                f"${r['invalidation']:,.2f}" if r["invalidation"] is not None else "—",
+                f"{r['risk_reward']:.2f}", f"{r['confidence']:.0f}%",
+                f"{r['historical_reliability']:.0f}% <span class='ew-muted'>({r['hr_tier']})</span>",
+                f"<strong style='color:#fff;'>{r['score']:.1f}</strong>",
+            ]
 
+        ts_headers = ["Ticker", "Phase", "Entry zone", "Next target", "Invalidation", "Risk/reward",
+                      "Confidence", "Hist. hit-rate", "Score"]
         st.markdown("**Top 15**")
-        st.dataframe(pd.DataFrame([_ew_setup_row(r) for r in top_setups[:15]]), width="stretch", hide_index=True)
+        st.markdown(ew_html_table(ts_headers, [_ew_setup_row(r) for r in top_setups[:15]], num_cols={2, 3, 4, 5, 6, 7, 8}),
+                    unsafe_allow_html=True)
         with st.expander(f"Weakest Setups — bottom {min(10, len(top_setups))} (shown for transparency)"):
-            st.dataframe(pd.DataFrame([_ew_setup_row(r) for r in top_setups[-10:]]), width="stretch", hide_index=True)
+            st.markdown(ew_html_table(ts_headers, [_ew_setup_row(r) for r in top_setups[-10:]], num_cols={2, 3, 4, 5, 6, 7, 8}),
+                        unsafe_allow_html=True)
     else:
         st.info("Click **Recompute rankings** to run the screener across the selected universe.")
     st.markdown(ew_card_close(), unsafe_allow_html=True)
@@ -794,23 +837,24 @@ with tab_wave:
     lc2.markdown(ew_hr_tile(str(hit_n), "Hit / roughly-hit", "counted in the numerator"), unsafe_allow_html=True)
     lc3.markdown(ew_hr_tile(str(revised_n), "Revised / superseded", "resolved, not as originally stated"), unsafe_allow_html=True)
     lc4.markdown(ew_hr_tile(str(excluded_n), "Pending / standing", "excluded from the denominator"), unsafe_allow_html=True)
-    call_df = pd.DataFrame([
-        {"Date/time": d, "Ticker": t, "Wave label": w, "Target/range": tg, "Timeframe": tf, "Outcome": o, "Resolution": r}
+    call_headers = ["Date/time", "Ticker", "Wave label", "Target/range", "Timeframe", "Outcome", "Resolution"]
+    call_rows = [
+        [d, f"<strong style='color:#fff;'>{t}</strong>", w, tg, tf, o, ew_outcome_badge(r)]
         for (d, t, w, tg, tf, o, r) in ew_content.CALL_LOG
-    ])
-    st.dataframe(call_df, width="stretch", hide_index=True, height=360)
+    ]
+    st.markdown(ew_html_table(call_headers, call_rows), unsafe_allow_html=True)
     st.markdown(ew_card_close(), unsafe_allow_html=True)
 
-    # ---- Playbook / Methodology ----
-    ew_pb_tab, ew_method_tab = st.tabs(["Playbook", "Methodology (technical)"])
+    # ---- Methodology / Playbook ----
+    ew_method_tab, ew_pb_tab = st.tabs(["Methodology (technical)", "Playbook"])
+    with ew_method_tab:
+        st.markdown(ew_card_open() + f'<div class="ew-methodology">{ew_content.METHODOLOGY_HTML}</div>' + ew_card_close(),
+                    unsafe_allow_html=True)
     with ew_pb_tab:
         st.markdown(ew_card_open("Playbook — the method observed in the chat"), unsafe_allow_html=True)
         cards_html = "".join(ew_playbook_card(n, title, text) for (n, title, text) in ew_content.PLAYBOOK)
         st.markdown(f'<div class="ew-playbook-grid">{cards_html}</div>', unsafe_allow_html=True)
         st.markdown(ew_card_close(), unsafe_allow_html=True)
-    with ew_method_tab:
-        st.markdown(ew_card_open() + f'<div class="ew-methodology">{ew_content.METHODOLOGY_HTML}</div>' + ew_card_close(),
-                    unsafe_allow_html=True)
 
     # ---- Caveats ----
     st.markdown(ew_card_open("Caveats — read this before believing any of it"), unsafe_allow_html=True)
