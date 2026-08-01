@@ -549,6 +549,8 @@ EW_SCAN_UNIVERSE = sorted(set(DEFAULT_UNIVERSE) | set(ew_content.PINNED_TICKERS)
 
 if "ew_ticker" not in st.session_state:
     st.session_state.ew_ticker = ew_content.BASKET_LEADER
+if "ew_last_search" not in st.session_state:
+    st.session_state.ew_last_search = ""
 if "ew_thresholds" not in st.session_state:
     st.session_state.ew_thresholds = {}
 
@@ -769,12 +771,19 @@ with tab_wave:
         is_active = tk == st.session_state.ew_ticker
         if pin_cols[i].button(tk, key=f"ew_pin_{tk}", type=("primary" if is_active else "secondary"), width="stretch"):
             st.session_state.ew_ticker = tk
+            st.rerun()
     other_ticker = pin_cols[-1].text_input("Other ticker", value="", key="ew_other_ticker",
                                             placeholder="Search any ticker…", label_visibility="collapsed")
-    if other_ticker.strip():
-        tk_upper = other_ticker.strip().upper()
-        if tk_upper != st.session_state.ew_ticker:
-            st.session_state.ew_ticker = tk_upper
+    # text_input persists its value across reruns via its own widget key — value="" only applies
+    # on first render. Without ew_last_search, leftover search text would silently re-fire and
+    # overwrite a pinned-ticker click on the very next rerun (that's the "lags one click behind"
+    # bug: click a pin, the click registers, then this block immediately stomps it back to
+    # whatever was last typed here). Only apply a search term once, the first time it's seen.
+    search_term = other_ticker.strip().upper()
+    if search_term and search_term != st.session_state.ew_last_search:
+        st.session_state.ew_last_search = search_term
+        st.session_state.ew_ticker = search_term
+        st.rerun()
 
     active_ticker = st.session_state.ew_ticker
     active_series, active_source = cached_ew_series(active_ticker, period, prefer_source_key)
