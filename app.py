@@ -541,6 +541,10 @@ EW_SCAN_UNIVERSE = sorted(set(DEFAULT_UNIVERSE) | set(ew_content.PINNED_TICKERS)
     "PLD", "AMT", "EQIX", "PSA", "O", "SPG", "WELL", "DLR",
     # Communication services
     "CMCSA", "TMUS",
+    # AI / semiconductors / memory / data-center infrastructure
+    "TSM", "ASML", "AMAT", "ON", "MPWR", "SWKS", "QRVO", "TER", "ENTG", "LSCC", "STM", "WOLF",
+    "WDC", "STX", "SNDK", "CSCO", "DELL", "HPE", "SMCI", "VRT", "CEG", "VST", "GEV",
+    "PLTR", "SNOW", "NOW", "MDB", "NET", "UBER", "SHOP",
 })
 
 if "ew_ticker" not in st.session_state:
@@ -723,7 +727,7 @@ with tab_wave:
                "and backtest outputs — no separate forecasting logic, no manual universe selection. Exact formula "
                "in the Methodology sub-tab below. Fetched concurrently, but a cold run still takes a minute or two.")
     scan_clicked = st.button("Recompute rankings", key="ew_scan_btn")
-    if scan_clicked:
+    if scan_clicked or "ew_top_setups" not in st.session_state:
         series_by_ticker = _ew_fetch_universe(EW_SCAN_UNIVERSE, period, prefer_source_key, "Scanning")
         threshold_by_ticker = {tk: st.session_state.ew_thresholds.get(tk, ew.DEFAULT_THRESHOLD_PCT) for tk in EW_SCAN_UNIVERSE}
         st.session_state.ew_top_setups = ew.compute_top_setups(list(series_by_ticker.keys()), series_by_ticker,
